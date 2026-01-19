@@ -47,9 +47,11 @@ app.use(
     origin: [
       'http://localhost:3000',
       'http://127.0.0.1:3000',
-      // Add production domains - update these with your actual Vercel URLs
-      process.env.FRONTEND_URL || 'https://retro-vinyls-client.vercel.app',
-    ],
+      // Production domain - exact match for security
+      'https://retro-vinyls.vercel.app',
+      // Fallback environment variable
+      process.env.FRONTEND_URL,
+    ].filter(Boolean), // Remove any undefined values
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
