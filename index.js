@@ -178,9 +178,13 @@ app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 // Request Logging Middleware
 app.use((req, res, next) => {
   const timestamp = new Date().toISOString();
-  console.log(`${timestamp} - ${req.method} ${req.path}`);
-  if (req.method === 'POST' && req.body) {
-    console.log('Request body keys:', Object.keys(req.body));
+
+  // Only log in development
+  if (process.env.NODE_ENV === 'development') {
+    console.log(`${timestamp} - ${req.method} ${req.path}`);
+    if (req.method === 'POST' && req.body) {
+      console.log('Request body keys:', Object.keys(req.body));
+    }
   }
   next();
 });
@@ -344,13 +348,9 @@ app.get('/api/items/:id', requireDatabase, async (req, res) => {
  */
 app.post('/api/items', requireDatabase, async (req, res) => {
   try {
-    console.log('📝 POST /api/items - Creating new vinyl record');
-    console.log('Request headers:', {
-      'content-type': req.headers['content-type'],
-      accept: req.headers['accept'],
-      origin: req.headers['origin'],
-    });
-    console.log('Request body:', JSON.stringify(req.body, null, 2));
+    if (process.env.NODE_ENV === 'development') {
+      console.log('📝 POST /api/items - Creating new vinyl record');
+    }
 
     const {
       name,
@@ -450,10 +450,12 @@ app.post('/api/items', requireDatabase, async (req, res) => {
       updatedAt: new Date(),
     };
 
-    console.log(
-      '💾 Inserting vinyl record:',
-      JSON.stringify(newVinyl, null, 2),
-    );
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        '💾 Inserting vinyl record:',
+        JSON.stringify(newVinyl, null, 2),
+      );
+    }
 
     // Database Insertion
     const collection = req.db.collection('vinyls');
@@ -468,10 +470,12 @@ app.post('/api/items', requireDatabase, async (req, res) => {
       ...newVinyl,
     };
 
-    console.log(
-      `✅ SUCCESS: Vinyl record created with ID: ${result.insertedId}`,
-    );
-    console.log(`📀 Record: "${name}" by ${artist}`);
+    if (process.env.NODE_ENV === 'development') {
+      console.log(
+        `✅ SUCCESS: Vinyl record created with ID: ${result.insertedId}`,
+      );
+      console.log(`📀 Record: "${name}" by ${artist}`);
+    }
 
     res.status(201).json({
       success: true,
@@ -481,8 +485,10 @@ app.post('/api/items', requireDatabase, async (req, res) => {
       timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('❌ CRITICAL ERROR in POST /api/items:', error);
-    console.error('Error stack:', error.stack);
+    if (process.env.NODE_ENV === 'development') {
+      console.error('❌ CRITICAL ERROR in POST /api/items:', error);
+      console.error('Error stack:', error.stack);
+    }
 
     res.status(500).json({
       success: false,
@@ -577,8 +583,10 @@ app.use((req, res) => {
  * Global Error Handler
  */
 app.use((error, req, res, next) => {
-  console.error('🚨 GLOBAL ERROR:', error);
-  console.error('Error stack:', error.stack);
+  if (process.env.NODE_ENV === 'development') {
+    console.error('🚨 GLOBAL ERROR:', error);
+    console.error('Error stack:', error.stack);
+  }
 
   res.status(500).json({
     success: false,
