@@ -16,7 +16,10 @@ const DB_NAME = process.env.DB_NAME || 'retrovinyls';
 // Validate required environment variables
 if (!MONGODB_URI) {
   console.error('❌ MONGODB_URI environment variable is required');
-  process.exit(1);
+  // Don't exit in production/serverless environment
+  if (process.env.NODE_ENV !== 'production') {
+    process.exit(1);
+  }
 }
 
 // Global variables for database connection (cached for serverless)
@@ -136,37 +139,6 @@ async function isDatabaseConnected() {
   }
 }
 
-// Graceful shutdown handler
-process.on('SIGINT', async () => {
-  console.log('\n🔄 Gracefully shutting down server...');
-
-  if (client && isConnected) {
-    try {
-      await client.close();
-      console.log('📊 MongoDB Atlas connection closed');
-    } catch (error) {
-      console.error('Error closing MongoDB connection:', error.message);
-    }
-  }
-
-  process.exit(0);
-});
-
-// Handle uncaught exceptions
-process.on('uncaughtException', async (error) => {
-  console.error('🚨 Uncaught Exception:', error);
-
-  if (client && isConnected) {
-    try {
-      await client.close();
-    } catch (closeError) {
-      console.error('Error closing MongoDB connection:', closeError.message);
-    }
-  }
-
-  process.exit(1);
-});
-
 // Routes
 
 /**
@@ -174,17 +146,30 @@ process.on('uncaughtException', async (error) => {
  * Returns a welcome message confirming the RetroVinyls API is running
  */
 app.get('/', (req, res) => {
-  res.json({
-    message: 'RetroVinyls API is running',
-    description: 'Premium platform for vintage music enthusiasts',
-    version: '1.0.0',
-    status: 'active',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      health: '/health',
-      documentation: 'Coming soon...',
-    },
-  });
+  console.log('Root endpoint accessed');
+
+  try {
+    res.json({
+      message: 'RetroVinyls API is running',
+      description: 'Premium platform for vintage music enthusiasts',
+      version: '1.0.0',
+      status: 'active',
+      timestamp: new Date().toISOString(),
+      environment: process.env.NODE_ENV || 'development',
+      hasMongoUri: !!process.env.MONGODB_URI,
+      endpoints: {
+        health: '/health',
+        items: '/api/items',
+        documentation: 'Coming soon...',
+      },
+    });
+  } catch (error) {
+    console.error('Error in root route:', error);
+    res.status(500).json({
+      error: 'Internal server error',
+      message: error.message,
+    });
+  }
 });
 
 /**
@@ -608,39 +593,48 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Server Initialization
+// Server Initialization (for local development only)
 async function startServer() {
   try {
-    // Attempt database connection (non-blocking)
-    const dbConnected = await connectToDatabase();
+    // Only start server in local development
+    if (process.env.NODE_ENV !== 'production') {
+      // Attempt database connection (non-blocking)
+      const dbConnected = await connectDB();
 
-    if (!dbConnected) {
-      console.warn('⚠️  Server starting without database connection');
-      console.warn(
-        '⚠️  Database features will be unavailable until connection is restored',
-      );
+      if (!dbConnected) {
+        console.warn('⚠️  Server starting without database connection');
+        console.warn(
+          '⚠️  Database features will be unavailable until connection is restored',
+        );
+      }
+
+      // Start the Express server
+      app.listen(PORT, () => {
+        console.log('\n🎵 ================================');
+        console.log('🎵 RetroVinyls Server Started');
+        console.log('🎵 ================================');
+        console.log(`🚀 Server running on port ${PORT}`);
+        console.log(`🌐 Local: http://localhost:${PORT}`);
+        console.log(`🔍 Health: http://localhost:${PORT}/health`);
+        console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
+        console.log(
+          `💾 Database: ${dbConnected ? 'Connected' : 'Disconnected'}`,
+        );
+        console.log('🎵 ================================\n');
+      });
     }
-
-    // Start the Express server
-    app.listen(PORT, () => {
-      console.log('\n🎵 ================================');
-      console.log('🎵 RetroVinyls Server Started');
-      console.log('🎵 ================================');
-      console.log(`🚀 Server running on port ${PORT}`);
-      console.log(`🌐 Local: http://localhost:${PORT}`);
-      console.log(`🔍 Health: http://localhost:${PORT}/health`);
-      console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-      console.log(`💾 Database: ${dbConnected ? 'Connected' : 'Disconnected'}`);
-      console.log('🎵 ================================\n');
-    });
   } catch (error) {
     console.error('❌ Failed to start server:', error);
-    process.exit(1);
+    if (process.env.NODE_ENV !== 'production') {
+      process.exit(1);
+    }
   }
 }
 
-// Start the server
-startServer();
+// Start the server only in development
+if (process.env.NODE_ENV !== 'production') {
+  startServer();
+}
 
 // Export the app for Vercel serverless functions
 module.exports = app;
