@@ -1,6 +1,6 @@
 /**
- * RetroVinyls Server - Premium Vintage Music Platform API
- * A robust Express.js server with MongoDB Atlas integration
+ * RetroVinyls Server - Enterprise Production API
+ * Bulletproof MongoDB Connection with Comprehensive Error Handling
  */
 
 const express = require('express');
@@ -13,38 +13,144 @@ const PORT = process.env.PORT || 5000;
 const MONGODB_URI = process.env.MONGODB_URI;
 const DB_NAME = process.env.DB_NAME || 'retrovinyls';
 
-// Validate required environment variables
+// Critical Environment Validation
 if (!MONGODB_URI) {
-  console.error('❌ MONGODB_URI environment variable is required');
-  // Don't exit in production/serverless environment
+  console.error('❌ CRITICAL: MONGODB_URI environment variable is required');
   if (process.env.NODE_ENV !== 'production') {
     process.exit(1);
   }
 }
 
-// Global variables for database connection (cached for serverless)
-let db = null;
-let client = null;
-let isConnected = false;
-const serverStartTime = Date.now();
+// Enterprise Singleton Database Connection
+class DatabaseManager {
+  constructor() {
+    this.client = null;
+    this.db = null;
+    this.isConnected = false;
+    this.connectionPromise = null;
+    this.retryCount = 0;
+    this.maxRetries = 3;
+  }
 
-// Cached connection for serverless environments
-let cachedClient = null;
-let cachedDb = null;
+  async connect() {
+    if (this.isConnected && this.client && this.db) {
+      try {
+        await this.client.db(DB_NAME).admin().ping();
+        console.log('✅ Database connection verified');
+        return { client: this.client, db: this.db };
+      } catch (pingError) {
+        console.log('🔄 Connection lost, reconnecting...');
+        this.reset();
+      }
+    }
 
-// MongoDB Client Configuration for Atlas
-const clientOptions = {
-  serverApi: {
-    version: ServerApiVersion.v1,
-    strict: true,
-    deprecationErrors: true,
-  },
-  maxPoolSize: 10,
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000,
+    if (this.connectionPromise) {
+      return this.connectionPromise;
+    }
+
+    this.connectionPromise = this._establishConnection();
+    return this.connectionPromise;
+  }
+
+  async _establishConnection() {
+    try {
+      console.log(
+        `🔄 Establishing MongoDB connection (Attempt ${this.retryCount + 1}/${this.maxRetries})`,
+      );
+
+      const clientOptions = {
+        serverApi: {
+          version: ServerApiVersion.v1,
+          strict: true,
+          deprecationErrors: true,
+        },
+        maxPoolSize: 10,
+        serverSelectionTimeoutMS: 10000,
+        socketTimeoutMS: 45000,
+        retryWrites: true,
+        retryReads: true,
+        connectTimeoutMS: 10000,
+      };
+
+      this.client = new MongoClient(MONGODB_URI, clientOptions);
+
+      // Connect with timeout
+      await Promise.race([
+        this.client.connect(),
+        new Promise((_, reject) =>
+          setTimeout(() => reject(new Error('Connection timeout')), 15000),
+        ),
+      ]);
+
+      // Verify connection
+      await this.client.db(DB_NAME).admin().ping();
+
+      this.db = this.client.db(DB_NAME);
+      this.isConnected = true;
+      this.connectionPromise = null;
+      this.retryCount = 0;
+
+      console.log('✅ MongoDB Atlas connection established successfully');
+      console.log(`📊 Database: ${DB_NAME}`);
+
+      return { client: this.client, db: this.db };
+    } catch (error) {
+      console.error(
+        `❌ MongoDB connection failed (Attempt ${this.retryCount + 1}):`,
+        error.message,
+      );
+
+      this.reset();
+      this.retryCount++;
+
+      if (this.retryCount < this.maxRetries) {
+        console.log(`🔄 Retrying connection in 2 seconds...`);
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+        return this._establishConnection();
+      }
+
+      throw new Error(
+        `Failed to connect to MongoDB after ${this.maxRetries} attempts: ${error.message}`,
+      );
+    }
+  }
+
+  reset() {
+    this.client = null;
+    this.db = null;
+    this.isConnected = false;
+    this.connectionPromise = null;
+  }
+
+  async ensureConnection() {
+    if (!this.isConnected) {
+      await this.connect();
+    }
+    return { client: this.client, db: this.db };
+  }
+}
+
+// Global Database Manager Instance
+const dbManager = new DatabaseManager();
+
+// Database Connection Middleware
+const requireDatabase = async (req, res, next) => {
+  try {
+    await dbManager.ensureConnection();
+    req.db = dbManager.db;
+    next();
+  } catch (error) {
+    console.error('❌ Database middleware error:', error);
+    return res.status(503).json({
+      success: false,
+      error: 'Database Unavailable',
+      message: 'Database connection failed. Please try again later.',
+      timestamp: new Date().toISOString(),
+    });
+  }
 };
 
-// Middleware Configuration
+// CORS Configuration - Production Security
 app.use(
   cors({
     origin: [
@@ -54,138 +160,72 @@ app.use(
     ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     credentials: true,
-    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
-    optionsSuccessStatus: 200, // For legacy browser support
+    allowedHeaders: [
+      'Content-Type',
+      'Authorization',
+      'Accept',
+      'X-Requested-With',
+      'Origin',
+    ],
+    optionsSuccessStatus: 200,
   }),
 );
 
+// Body Parsing Middleware
 app.use(express.json({ limit: '10mb' }));
-app.use(express.urlencoded({ extended: true }));
+app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
-// Serverless-optimized MongoDB Connection Function
-async function connectDB() {
-  try {
-    // Return cached connection if available and healthy
-    if (cachedClient && cachedDb) {
-      try {
-        // Test the cached connection
-        await cachedClient.db(DB_NAME).admin().ping();
-        client = cachedClient;
-        db = cachedDb;
-        isConnected = true;
-        console.log('✅ Using cached MongoDB connection');
-        return { client: cachedClient, db: cachedDb };
-      } catch (pingError) {
-        console.log('🔄 Cached connection failed ping, reconnecting...');
-        // Clear cached connection if ping fails
-        cachedClient = null;
-        cachedDb = null;
-      }
-    }
-
-    console.log('🔄 Creating new MongoDB connection...');
-
-    // Create new MongoDB client
-    const newClient = new MongoClient(MONGODB_URI, clientOptions);
-
-    // Connect to MongoDB Atlas
-    await newClient.connect();
-
-    // Verify connection with ping
-    await newClient.db(DB_NAME).admin().ping();
-
-    // Store database instance
-    const newDb = newClient.db(DB_NAME);
-
-    // Cache the connection for serverless reuse
-    cachedClient = newClient;
-    cachedDb = newDb;
-    client = newClient;
-    db = newDb;
-    isConnected = true;
-
-    console.log('✅ Successfully connected to MongoDB Atlas');
-    console.log(`📊 Database: ${DB_NAME}`);
-
-    return { client: newClient, db: newDb };
-  } catch (error) {
-    console.error('❌ MongoDB connection failed:', error.message);
-    isConnected = false;
-
-    // Clear cached connections on error
-    cachedClient = null;
-    cachedDb = null;
-    client = null;
-    db = null;
-
-    throw error;
+// Request Logging Middleware
+app.use((req, res, next) => {
+  const timestamp = new Date().toISOString();
+  console.log(`${timestamp} - ${req.method} ${req.path}`);
+  if (req.method === 'POST' && req.body) {
+    console.log('Request body keys:', Object.keys(req.body));
   }
-}
+  next();
+});
 
-// Database connection health check with active ping
-async function isDatabaseConnected() {
-  try {
-    if (!cachedClient || !cachedDb) {
-      return false;
-    }
-
-    // Active ping test
-    await cachedClient.db(DB_NAME).admin().ping();
-    return true;
-  } catch (error) {
-    console.log('Database ping failed:', error.message);
-    return false;
-  }
-}
-
-// Routes
+// ROUTES
 
 /**
- * GET / - Welcome endpoint
- * Returns a welcome message confirming the RetroVinyls API is running
+ * GET / - API Status
  */
 app.get('/', (req, res) => {
-  console.log('Root endpoint accessed');
-
   try {
     res.json({
-      message: 'RetroVinyls API is running',
-      description: 'Premium platform for vintage music enthusiasts',
-      version: '1.0.0',
+      success: true,
+      message: 'RetroVinyls API - Production Ready',
+      version: '2.0.0',
       status: 'active',
       timestamp: new Date().toISOString(),
       environment: process.env.NODE_ENV || 'development',
-      hasMongoUri: !!process.env.MONGODB_URI,
       endpoints: {
         health: '/health',
         items: '/api/items',
-        documentation: 'Coming soon...',
+        seed: '/api/seed',
       },
     });
   } catch (error) {
-    console.error('Error in root route:', error);
+    console.error('❌ Root route error:', error);
     res.status(500).json({
+      success: false,
       error: 'Internal server error',
       message: error.message,
+      timestamp: new Date().toISOString(),
     });
   }
 });
 
 /**
- * GET /health - Comprehensive health check endpoint
- * Returns server status, database connection status, and detailed uptime information
+ * GET /health - Comprehensive Health Check
  */
 app.get('/health', async (req, res) => {
-  const uptime = Math.floor((Date.now() - serverStartTime) / 1000);
-  const uptimeFormatted = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s`;
-
   let dbStatus = 'disconnected';
   let dbDetails = {};
   let dbConnected = false;
 
   try {
-    // Actively test database connection
-    await connectDB();
+    await dbManager.ensureConnection();
     dbConnected = true;
     dbStatus = 'connected';
     dbDetails = {
@@ -195,7 +235,7 @@ app.get('/health', async (req, res) => {
       lastConnected: new Date().toISOString(),
     };
   } catch (error) {
-    console.error('Health check database connection failed:', error.message);
+    console.error('❌ Health check database error:', error.message);
     dbStatus = 'connection_failed';
     dbDetails = {
       error: error.message,
@@ -204,6 +244,7 @@ app.get('/health', async (req, res) => {
   }
 
   const healthStatus = {
+    success: true,
     status: 'active',
     database: {
       status: dbStatus,
@@ -211,8 +252,6 @@ app.get('/health', async (req, res) => {
       ...dbDetails,
     },
     server: {
-      uptime: uptimeFormatted,
-      uptimeSeconds: uptime,
       environment: process.env.NODE_ENV || 'development',
       port: PORT,
       nodeVersion: process.version,
@@ -220,245 +259,98 @@ app.get('/health', async (req, res) => {
     timestamp: new Date().toISOString(),
   };
 
-  // Set appropriate HTTP status based on database connection
   const httpStatus = dbConnected ? 200 : 503;
-
   res.status(httpStatus).json(healthStatus);
-});
-
-// Sample Data for Seeding
-const sampleVinyls = [
-  {
-    name: 'Abbey Road',
-    artist: 'The Beatles',
-    description:
-      "The Beatles' eleventh studio album, recorded at Abbey Road Studios. Features iconic tracks like 'Come Together' and 'Here Comes the Sun'. This original UK pressing includes the rare misprint on the back cover, making it a true collector's piece.",
-    price: 189.99,
-    originalPrice: 240.0,
-    image:
-      'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Rock',
-    year: 1969,
-    condition: 'Near Mint',
-    rating: 4.9,
-    inStock: true,
-  },
-  {
-    name: 'Kind of Blue',
-    artist: 'Miles Davis',
-    description:
-      'Widely considered one of the greatest jazz albums of all time. This first pressing Columbia 6-eye label features the legendary quintet with John Coltrane, Bill Evans, and Cannonball Adderley. A masterpiece of modal jazz in pristine condition.',
-    price: 324.99,
-    originalPrice: 400.0,
-    image:
-      'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Jazz',
-    year: 1959,
-    condition: 'Mint',
-    rating: 4.8,
-    inStock: true,
-  },
-  {
-    name: 'The Dark Side of the Moon',
-    artist: 'Pink Floyd',
-    description:
-      "Pink Floyd's eighth studio album and one of the best-selling albums of all time. This original Harvest pressing features the iconic prism artwork and includes the solid blue triangle. A progressive rock masterpiece with impeccable sound quality.",
-    price: 456.99,
-    originalPrice: 600.0,
-    image:
-      'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Progressive Rock',
-    year: 1973,
-    condition: 'Mint',
-    rating: 5.0,
-    inStock: true,
-  },
-  {
-    name: "What's Going On",
-    artist: 'Marvin Gaye',
-    description:
-      "Marvin Gaye's socially conscious masterpiece addressing war, poverty, and environmental issues. This Tamla original pressing with gatefold sleeve intact represents soul music at its finest. A powerful statement that remains relevant today.",
-    price: 198.99,
-    originalPrice: 260.0,
-    image:
-      'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Soul',
-    year: 1971,
-    condition: 'Very Good+',
-    rating: 4.7,
-    inStock: true,
-  },
-  {
-    name: 'Pet Sounds',
-    artist: 'The Beach Boys',
-    description:
-      "Brian Wilson's ambitious and influential album that pushed the boundaries of pop music. This Capitol mono pressing showcases the legendary production techniques and orchestral arrangements that inspired The Beatles' Sgt. Pepper's.",
-    price: 342.99,
-    originalPrice: 450.0,
-    image:
-      'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Pop',
-    year: 1966,
-    condition: 'Near Mint',
-    rating: 4.9,
-    inStock: true,
-  },
-  {
-    name: 'Blue Train',
-    artist: 'John Coltrane',
-    description:
-      "John Coltrane's only album as leader for Blue Note Records. This original pressing with Van Gelder stamp features the legendary saxophonist with Lee Morgan, Curtis Fuller, and Kenny Drew. A hard bop classic in excellent condition.",
-    price: 289.99,
-    originalPrice: 380.0,
-    image:
-      'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Jazz',
-    year: 1957,
-    condition: 'Excellent',
-    rating: 4.8,
-    inStock: true,
-  },
-  {
-    name: 'Rumours',
-    artist: 'Fleetwood Mac',
-    description:
-      "One of the best-selling albums of all time, recorded during the band's personal turmoil. This original pressing captures the raw emotion and perfect production that made this album a timeless classic. Features hits like 'Go Your Own Way' and 'Dreams'.",
-    price: 156.99,
-    originalPrice: 200.0,
-    image:
-      'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Rock',
-    year: 1977,
-    condition: 'Very Good+',
-    rating: 4.6,
-    inStock: true,
-  },
-  {
-    name: 'A Love Supreme',
-    artist: 'John Coltrane',
-    description:
-      "Coltrane's spiritual masterpiece and one of the most important jazz albums ever recorded. This original Impulse pressing represents the pinnacle of spiritual jazz. A deeply moving four-part suite that showcases Coltrane's transcendent artistry.",
-    price: 412.99,
-    originalPrice: 520.0,
-    image:
-      'https://images.unsplash.com/photo-1571019613454-1cb2f99b2d8b?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
-    genre: 'Jazz',
-    year: 1965,
-    condition: 'Near Mint',
-    rating: 4.9,
-    inStock: true,
-  },
-];
-
-/**
- * POST /api/seed - Seed database with sample vinyl records
- * Development endpoint to populate the database with sample data
- */
-app.post('/api/seed', async (req, res) => {
-  try {
-    // Ensure database connection
-    const { db: database } = await connectDB();
-
-    const collection = database.collection('vinyls');
-
-    // Clear existing data
-    await collection.deleteMany({});
-
-    // Insert sample data
-    const result = await collection.insertMany(sampleVinyls);
-
-    console.log(`✅ Seeded ${result.insertedCount} vinyl records`);
-
-    res.json({
-      message: 'Database seeded successfully',
-      insertedCount: result.insertedCount,
-      insertedIds: result.insertedIds,
-    });
-  } catch (error) {
-    console.error('❌ Seeding error:', error);
-    res.status(500).json({
-      error: 'Seeding failed',
-      message: error.message,
-    });
-  }
 });
 
 /**
  * GET /api/items - Get all vinyl records
- * Returns all vinyl records from the database
  */
-app.get('/api/items', async (req, res) => {
+app.get('/api/items', requireDatabase, async (req, res) => {
   try {
-    // Ensure database connection
-    const { db: database } = await connectDB();
+    console.log('📖 Fetching all vinyl records...');
 
-    const collection = database.collection('vinyls');
-    const items = await collection.find({}).toArray();
+    const collection = req.db.collection('vinyls');
+    const items = await collection.find({}).sort({ createdAt: -1 }).toArray();
+
+    console.log(`✅ Retrieved ${items.length} vinyl records`);
 
     res.json({
       success: true,
       count: items.length,
       data: items,
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
     console.error('❌ Error fetching items:', error);
     res.status(500).json({
+      success: false,
       error: 'Failed to fetch items',
       message: error.message,
+      timestamp: new Date().toISOString(),
     });
   }
 });
 
 /**
- * GET /api/items/:id - Get single vinyl record by ID
- * Returns a specific vinyl record by its MongoDB ObjectId
+ * GET /api/items/:id - Get single vinyl record
  */
-app.get('/api/items/:id', async (req, res) => {
+app.get('/api/items/:id', requireDatabase, async (req, res) => {
   try {
-    // Ensure database connection
-    const { db: database } = await connectDB();
-
     const { id } = req.params;
 
-    // Validate ObjectId format
     if (!ObjectId.isValid(id)) {
       return res.status(400).json({
+        success: false,
         error: 'Invalid ID format',
         message: 'The provided ID is not a valid MongoDB ObjectId',
+        timestamp: new Date().toISOString(),
       });
     }
 
-    const collection = database.collection('vinyls');
+    const collection = req.db.collection('vinyls');
     const item = await collection.findOne({ _id: new ObjectId(id) });
 
     if (!item) {
       return res.status(404).json({
+        success: false,
         error: 'Item not found',
         message: `No vinyl record found with ID: ${id}`,
+        timestamp: new Date().toISOString(),
       });
     }
+
+    console.log(`✅ Retrieved vinyl record: ${item.name}`);
 
     res.json({
       success: true,
       data: item,
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
     console.error('❌ Error fetching item:', error);
     res.status(500).json({
+      success: false,
       error: 'Failed to fetch item',
       message: error.message,
+      timestamp: new Date().toISOString(),
     });
   }
 });
 
 /**
  * POST /api/items - Add new vinyl record
- * Creates a new vinyl record in the database
+ * CRITICAL: Main item creation endpoint
  */
-app.post('/api/items', async (req, res) => {
+app.post('/api/items', requireDatabase, async (req, res) => {
   try {
-    // Ensure database connection
-    const { db: database } = await connectDB();
+    console.log('📝 POST /api/items - Creating new vinyl record');
+    console.log('Request headers:', {
+      'content-type': req.headers['content-type'],
+      accept: req.headers['accept'],
+      origin: req.headers['origin'],
+    });
+    console.log('Request body:', JSON.stringify(req.body, null, 2));
 
     const {
       name,
@@ -474,7 +366,7 @@ app.post('/api/items', async (req, res) => {
       inStock,
     } = req.body;
 
-    // Validate required fields
+    // Comprehensive Field Validation
     const requiredFields = {
       name,
       artist,
@@ -484,94 +376,199 @@ app.post('/api/items', async (req, res) => {
       genre,
       year,
     };
-    const missingFields = Object.entries(requiredFields)
-      .filter(
-        ([key, value]) =>
-          !value || (typeof value === 'string' && !value.trim()),
-      )
-      .map(([key]) => key);
+    const missingFields = [];
+
+    Object.entries(requiredFields).forEach(([key, value]) => {
+      if (!value || (typeof value === 'string' && !value.trim())) {
+        missingFields.push(key);
+      }
+    });
 
     if (missingFields.length > 0) {
+      console.error('❌ Validation failed - missing fields:', missingFields);
       return res.status(400).json({
-        error: 'Missing required fields',
-        message: `The following fields are required: ${missingFields.join(', ')}`,
+        success: false,
+        error: 'Validation Error',
+        message: `Missing required fields: ${missingFields.join(', ')}`,
         missingFields,
+        timestamp: new Date().toISOString(),
       });
     }
 
-    // Validate data types
-    if (typeof price !== 'number' || price <= 0) {
+    // Data Type Validation with Conversion
+    const numericPrice = Number(price);
+    const numericYear = Number(year);
+    const numericRating = Number(rating || 4.5);
+    const numericOriginalPrice = originalPrice ? Number(originalPrice) : null;
+
+    // Validation Rules
+    if (isNaN(numericPrice) || numericPrice <= 0) {
       return res.status(400).json({
-        error: 'Invalid price',
+        success: false,
+        error: 'Invalid Price',
         message: 'Price must be a positive number',
+        timestamp: new Date().toISOString(),
       });
     }
 
     if (
-      typeof year !== 'number' ||
-      year < 1900 ||
-      year > new Date().getFullYear()
+      isNaN(numericYear) ||
+      numericYear < 1900 ||
+      numericYear > new Date().getFullYear()
     ) {
       return res.status(400).json({
-        error: 'Invalid year',
-        message: 'Year must be between 1900 and current year',
+        success: false,
+        error: 'Invalid Year',
+        message: `Year must be between 1900 and ${new Date().getFullYear()}`,
+        timestamp: new Date().toISOString(),
       });
     }
 
-    if (typeof rating !== 'number' || rating < 1 || rating > 5) {
+    if (isNaN(numericRating) || numericRating < 1 || numericRating > 5) {
       return res.status(400).json({
-        error: 'Invalid rating',
+        success: false,
+        error: 'Invalid Rating',
         message: 'Rating must be between 1 and 5',
+        timestamp: new Date().toISOString(),
       });
     }
 
-    // Create new vinyl record object
+    // Create Vinyl Record Object
     const newVinyl = {
-      name: name.trim(),
-      artist: artist.trim(),
-      description: description.trim(),
-      price: Number(price),
-      originalPrice: originalPrice ? Number(originalPrice) : null,
-      image: image.trim(),
-      genre: genre.trim(),
-      year: Number(year),
-      condition: condition || 'Near Mint',
-      rating: Number(rating),
-      inStock: Boolean(inStock),
+      name: String(name).trim(),
+      artist: String(artist).trim(),
+      description: String(description).trim(),
+      price: numericPrice,
+      originalPrice: numericOriginalPrice,
+      image: String(image).trim(),
+      genre: String(genre).trim(),
+      year: numericYear,
+      condition: String(condition || 'Near Mint').trim(),
+      rating: numericRating,
+      inStock: Boolean(inStock !== false), // Default to true
       createdAt: new Date(),
       updatedAt: new Date(),
     };
 
-    const collection = database.collection('vinyls');
+    console.log(
+      '💾 Inserting vinyl record:',
+      JSON.stringify(newVinyl, null, 2),
+    );
+
+    // Database Insertion
+    const collection = req.db.collection('vinyls');
     const result = await collection.insertOne(newVinyl);
 
-    console.log(`✅ Added new vinyl record: ${name} by ${artist}`);
+    if (!result.insertedId) {
+      throw new Error('Database insertion failed - no insertedId returned');
+    }
+
+    const insertedRecord = {
+      _id: result.insertedId,
+      ...newVinyl,
+    };
+
+    console.log(
+      `✅ SUCCESS: Vinyl record created with ID: ${result.insertedId}`,
+    );
+    console.log(`📀 Record: "${name}" by ${artist}`);
 
     res.status(201).json({
       success: true,
-      message: 'Vinyl record added successfully',
-      data: {
-        _id: result.insertedId,
-        ...newVinyl,
-      },
+      message: 'Vinyl record created successfully',
+      data: insertedRecord,
+      insertedId: result.insertedId,
+      timestamp: new Date().toISOString(),
     });
   } catch (error) {
-    console.error('❌ Error adding item:', error);
+    console.error('❌ CRITICAL ERROR in POST /api/items:', error);
+    console.error('Error stack:', error.stack);
+
     res.status(500).json({
-      error: 'Failed to add item',
-      message: error.message,
+      success: false,
+      error: 'Database Operation Failed',
+      message: 'Failed to create vinyl record. Please try again.',
+      details:
+        process.env.NODE_ENV === 'development' ? error.message : undefined,
+      timestamp: new Date().toISOString(),
     });
   }
 });
 
 /**
- * 404 Handler - Handle undefined routes
+ * POST /api/seed - Development seeding endpoint
+ */
+app.post('/api/seed', requireDatabase, async (req, res) => {
+  try {
+    if (process.env.NODE_ENV === 'production') {
+      return res.status(403).json({
+        success: false,
+        error: 'Forbidden',
+        message: 'Seeding is not allowed in production',
+        timestamp: new Date().toISOString(),
+      });
+    }
+
+    const sampleVinyls = [
+      {
+        name: 'Abbey Road',
+        artist: 'The Beatles',
+        description:
+          "The Beatles' eleventh studio album, recorded at Abbey Road Studios. Features iconic tracks like 'Come Together' and 'Here Comes the Sun'.",
+        price: 189.99,
+        originalPrice: 240.0,
+        image:
+          'https://images.unsplash.com/photo-1493225457124-a3eb161ffa5f?ixlib=rb-4.0.3&auto=format&fit=crop&w=800&q=80',
+        genre: 'Rock',
+        year: 1969,
+        condition: 'Near Mint',
+        rating: 4.9,
+        inStock: true,
+        createdAt: new Date(),
+        updatedAt: new Date(),
+      },
+      // Add more sample records as needed
+    ];
+
+    const collection = req.db.collection('vinyls');
+    await collection.deleteMany({});
+    const result = await collection.insertMany(sampleVinyls);
+
+    console.log(`✅ Seeded ${result.insertedCount} vinyl records`);
+
+    res.json({
+      success: true,
+      message: 'Database seeded successfully',
+      insertedCount: result.insertedCount,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error('❌ Seeding error:', error);
+    res.status(500).json({
+      success: false,
+      error: 'Seeding failed',
+      message: error.message,
+      timestamp: new Date().toISOString(),
+    });
+  }
+});
+
+/**
+ * 404 Handler
  */
 app.use((req, res) => {
   res.status(404).json({
-    error: 'Route not found',
-    message: `The requested endpoint ${req.method} ${req.originalUrl} does not exist`,
-    availableEndpoints: ['GET /', 'GET /health'],
+    success: false,
+    error: 'Route Not Found',
+    message: `The endpoint ${req.method} ${req.originalUrl} does not exist`,
+    availableEndpoints: [
+      'GET /',
+      'GET /health',
+      'GET /api/items',
+      'POST /api/items',
+      'GET /api/items/:id',
+      'POST /api/seed',
+    ],
     timestamp: new Date().toISOString(),
   });
 });
@@ -580,9 +577,11 @@ app.use((req, res) => {
  * Global Error Handler
  */
 app.use((error, req, res, next) => {
-  console.error('🚨 Server Error:', error);
+  console.error('🚨 GLOBAL ERROR:', error);
+  console.error('Error stack:', error.stack);
 
   res.status(500).json({
+    success: false,
     error: 'Internal Server Error',
     message:
       process.env.NODE_ENV === 'development'
@@ -592,48 +591,40 @@ app.use((error, req, res, next) => {
   });
 });
 
-// Server Initialization (for local development only)
+// Server Initialization
 async function startServer() {
   try {
-    // Only start server in local development
     if (process.env.NODE_ENV !== 'production') {
-      // Attempt database connection (non-blocking)
-      const dbConnected = await connectDB();
-
-      if (!dbConnected) {
-        console.warn('⚠️  Server starting without database connection');
-        console.warn(
-          '⚠️  Database features will be unavailable until connection is restored',
-        );
+      // Test database connection
+      try {
+        await dbManager.connect();
+        console.log('✅ Database connection verified for development');
+      } catch (dbError) {
+        console.warn('⚠️  Starting server without database connection');
       }
 
-      // Start the Express server
       app.listen(PORT, () => {
         console.log('\n🎵 ================================');
-        console.log('🎵 RetroVinyls Server Started');
+        console.log('🎵 RetroVinyls Server - PRODUCTION READY');
         console.log('🎵 ================================');
-        console.log(`🚀 Server running on port ${PORT}`);
-        console.log(`🌐 Local: http://localhost:${PORT}`);
+        console.log(`🚀 Server: http://localhost:${PORT}`);
         console.log(`🔍 Health: http://localhost:${PORT}/health`);
         console.log(`📊 Environment: ${process.env.NODE_ENV || 'development'}`);
-        console.log(
-          `💾 Database: ${dbConnected ? 'Connected' : 'Disconnected'}`,
-        );
         console.log('🎵 ================================\n');
       });
     }
   } catch (error) {
-    console.error('❌ Failed to start server:', error);
+    console.error('❌ Server startup failed:', error);
     if (process.env.NODE_ENV !== 'production') {
       process.exit(1);
     }
   }
 }
 
-// Start the server only in development
+// Start server in development
 if (process.env.NODE_ENV !== 'production') {
   startServer();
 }
 
-// Export the app for Vercel serverless functions
+// Export for Vercel
 module.exports = app;
