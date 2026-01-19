@@ -429,6 +429,123 @@ app.get('/api/items/:id', async (req, res) => {
 });
 
 /**
+ * POST /api/items - Add new vinyl record
+ * Creates a new vinyl record in the database
+ */
+app.post('/api/items', async (req, res) => {
+  try {
+    if (!isDatabaseConnected()) {
+      return res.status(503).json({
+        error: 'Database not connected',
+        message: 'Cannot add item without database connection',
+      });
+    }
+
+    const {
+      name,
+      artist,
+      description,
+      price,
+      originalPrice,
+      image,
+      genre,
+      year,
+      condition,
+      rating,
+      inStock,
+    } = req.body;
+
+    // Validate required fields
+    const requiredFields = {
+      name,
+      artist,
+      description,
+      price,
+      image,
+      genre,
+      year,
+    };
+    const missingFields = Object.entries(requiredFields)
+      .filter(
+        ([key, value]) =>
+          !value || (typeof value === 'string' && !value.trim()),
+      )
+      .map(([key]) => key);
+
+    if (missingFields.length > 0) {
+      return res.status(400).json({
+        error: 'Missing required fields',
+        message: `The following fields are required: ${missingFields.join(', ')}`,
+        missingFields,
+      });
+    }
+
+    // Validate data types
+    if (typeof price !== 'number' || price <= 0) {
+      return res.status(400).json({
+        error: 'Invalid price',
+        message: 'Price must be a positive number',
+      });
+    }
+
+    if (
+      typeof year !== 'number' ||
+      year < 1900 ||
+      year > new Date().getFullYear()
+    ) {
+      return res.status(400).json({
+        error: 'Invalid year',
+        message: 'Year must be between 1900 and current year',
+      });
+    }
+
+    if (typeof rating !== 'number' || rating < 1 || rating > 5) {
+      return res.status(400).json({
+        error: 'Invalid rating',
+        message: 'Rating must be between 1 and 5',
+      });
+    }
+
+    // Create new vinyl record object
+    const newVinyl = {
+      name: name.trim(),
+      artist: artist.trim(),
+      description: description.trim(),
+      price: Number(price),
+      originalPrice: originalPrice ? Number(originalPrice) : null,
+      image: image.trim(),
+      genre: genre.trim(),
+      year: Number(year),
+      condition: condition || 'Near Mint',
+      rating: Number(rating),
+      inStock: Boolean(inStock),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+
+    const collection = db.collection('vinyls');
+    const result = await collection.insertOne(newVinyl);
+
+    console.log(`✅ Added new vinyl record: ${name} by ${artist}`);
+
+    res.status(201).json({
+      success: true,
+      message: 'Vinyl record added successfully',
+      data: {
+        _id: result.insertedId,
+        ...newVinyl,
+      },
+    });
+  } catch (error) {
+    console.error('❌ Error adding item:', error);
+    res.status(500).json({
+      error: 'Failed to add item',
+      message: error.message,
+    });
+  }
+});
+
+/**
  * 404 Handler - Handle undefined routes
  */
 app.use((req, res) => {
