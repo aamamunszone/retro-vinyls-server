@@ -51,10 +51,9 @@ app.use(
       'https://retro-vinyls.vercel.app',
       'http://localhost:3000',
       'http://127.0.0.1:3000',
-      process.env.FRONTEND_URL,
-    ].filter(Boolean), // Remove any undefined values
-    credentials: true,
+    ],
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+    credentials: true,
     allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
     optionsSuccessStatus: 200, // For legacy browser support
   }),
