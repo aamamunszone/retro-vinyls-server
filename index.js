@@ -45,21 +45,32 @@ const clientOptions = {
 app.use(
   cors({
     origin: [
+      'https://retro-vinyls.vercel.app',
       'http://localhost:3000',
       'http://127.0.0.1:3000',
-      // Production domain - exact match for security
-      'https://retro-vinyls.vercel.app',
-      // Fallback environment variable
       process.env.FRONTEND_URL,
     ].filter(Boolean), // Remove any undefined values
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-    allowedHeaders: ['Content-Type', 'Authorization'],
+    allowedHeaders: ['Content-Type', 'Authorization', 'Accept'],
+    optionsSuccessStatus: 200, // For legacy browser support
   }),
 );
 
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
+
+// Database connection middleware - ensure DB is connected before handling requests
+app.use(async (req, res, next) => {
+  if (!isDatabaseConnected() && req.path.startsWith('/api/')) {
+    try {
+      await connectToDatabase();
+    } catch (error) {
+      console.error('Failed to connect to database:', error);
+    }
+  }
+  next();
+});
 
 // MongoDB Connection Function (optimized for serverless)
 async function connectToDatabase() {
