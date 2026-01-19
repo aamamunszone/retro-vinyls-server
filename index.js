@@ -19,11 +19,15 @@ if (!MONGODB_URI) {
   process.exit(1);
 }
 
-// Global variables for database connection
+// Global variables for database connection (cached for serverless)
 let db = null;
 let client = null;
 let isConnected = false;
 const serverStartTime = Date.now();
+
+// Cached connection for serverless environments
+let cachedClient = null;
+let cachedDb = null;
 
 // MongoDB Client Configuration for Atlas
 const clientOptions = {
@@ -40,7 +44,12 @@ const clientOptions = {
 // Middleware Configuration
 app.use(
   cors({
-    origin: ['http://localhost:3000', 'http://127.0.0.1:3000'],
+    origin: [
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      // Add production domains - update these with your actual Vercel URLs
+      process.env.FRONTEND_URL || 'https://retro-vinyls-client.vercel.app',
+    ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
     allowedHeaders: ['Content-Type', 'Authorization'],
@@ -50,9 +59,17 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// MongoDB Connection Function
+// MongoDB Connection Function (optimized for serverless)
 async function connectToDatabase() {
   try {
+    // Return cached connection if available
+    if (cachedClient && cachedDb) {
+      client = cachedClient;
+      db = cachedDb;
+      isConnected = true;
+      return true;
+    }
+
     console.log('🔄 Connecting to MongoDB Atlas...');
 
     // Create MongoDB client
@@ -67,6 +84,10 @@ async function connectToDatabase() {
     // Store database instance
     db = client.db(DB_NAME);
     isConnected = true;
+
+    // Cache the connection for serverless reuse
+    cachedClient = client;
+    cachedDb = db;
 
     console.log('✅ Successfully connected to MongoDB Atlas');
     console.log(`📊 Database: ${DB_NAME}`);
@@ -606,3 +627,6 @@ async function startServer() {
 
 // Start the server
 startServer();
+
+// Export the app for Vercel serverless functions
+module.exports = app;
