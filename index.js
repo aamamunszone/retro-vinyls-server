@@ -60,69 +60,78 @@ app.use(
 app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true }));
 
-// Database connection middleware - ensure DB is connected before handling requests
-app.use(async (req, res, next) => {
-  if (!isDatabaseConnected() && req.path.startsWith('/api/')) {
-    try {
-      await connectToDatabase();
-    } catch (error) {
-      console.error('Failed to connect to database:', error);
-    }
-  }
-  next();
-});
-
-// MongoDB Connection Function (optimized for serverless)
-async function connectToDatabase() {
+// Serverless-optimized MongoDB Connection Function
+async function connectDB() {
   try {
-    // Return cached connection if available
+    // Return cached connection if available and healthy
     if (cachedClient && cachedDb) {
-      client = cachedClient;
-      db = cachedDb;
-      isConnected = true;
-      return true;
+      try {
+        // Test the cached connection
+        await cachedClient.db(DB_NAME).admin().ping();
+        client = cachedClient;
+        db = cachedDb;
+        isConnected = true;
+        console.log('✅ Using cached MongoDB connection');
+        return { client: cachedClient, db: cachedDb };
+      } catch (pingError) {
+        console.log('🔄 Cached connection failed ping, reconnecting...');
+        // Clear cached connection if ping fails
+        cachedClient = null;
+        cachedDb = null;
+      }
     }
 
-    console.log('🔄 Connecting to MongoDB Atlas...');
+    console.log('🔄 Creating new MongoDB connection...');
 
-    // Create MongoDB client
-    client = new MongoClient(MONGODB_URI, clientOptions);
+    // Create new MongoDB client
+    const newClient = new MongoClient(MONGODB_URI, clientOptions);
 
     // Connect to MongoDB Atlas
-    await client.connect();
+    await newClient.connect();
 
     // Verify connection with ping
-    await client.db(DB_NAME).admin().ping();
+    await newClient.db(DB_NAME).admin().ping();
 
     // Store database instance
-    db = client.db(DB_NAME);
-    isConnected = true;
+    const newDb = newClient.db(DB_NAME);
 
     // Cache the connection for serverless reuse
-    cachedClient = client;
-    cachedDb = db;
+    cachedClient = newClient;
+    cachedDb = newDb;
+    client = newClient;
+    db = newDb;
+    isConnected = true;
 
     console.log('✅ Successfully connected to MongoDB Atlas');
     console.log(`📊 Database: ${DB_NAME}`);
-    console.log(`🌐 Cluster: RetroVinylsCluster`);
 
-    return true;
+    return { client: newClient, db: newDb };
   } catch (error) {
-    console.error('❌ MongoDB Atlas connection failed:', error.message);
+    console.error('❌ MongoDB connection failed:', error.message);
     isConnected = false;
 
-    // Don't exit the process, allow server to start without DB
-    return false;
+    // Clear cached connections on error
+    cachedClient = null;
+    cachedDb = null;
+    client = null;
+    db = null;
+
+    throw error;
   }
 }
 
-// Database connection health check
-function isDatabaseConnected() {
+// Database connection health check with active ping
+async function isDatabaseConnected() {
   try {
-    return (
-      client && isConnected && client.topology && client.topology.isConnected()
-    );
+    if (!cachedClient || !cachedDb) {
+      return false;
+    }
+
+    // Active ping test
+    await cachedClient.db(DB_NAME).admin().ping();
+    return true;
   } catch (error) {
+    console.log('Database ping failed:', error.message);
     return false;
   }
 }
@@ -186,20 +195,28 @@ app.get('/health', async (req, res) => {
   const uptime = Math.floor((Date.now() - serverStartTime) / 1000);
   const uptimeFormatted = `${Math.floor(uptime / 3600)}h ${Math.floor((uptime % 3600) / 60)}m ${uptime % 60}s`;
 
-  // Check actual database connection status
-  const dbConnected = isDatabaseConnected();
   let dbStatus = 'disconnected';
   let dbDetails = {};
+  let dbConnected = false;
 
-  if (dbConnected) {
+  try {
+    // Actively test database connection
+    await connectDB();
+    dbConnected = true;
     dbStatus = 'connected';
     dbDetails = {
       name: DB_NAME,
       cluster: 'RetroVinylsCluster',
       provider: 'MongoDB Atlas',
+      lastConnected: new Date().toISOString(),
     };
-  } else if (client) {
-    dbStatus = 'connection_lost';
+  } catch (error) {
+    console.error('Health check database connection failed:', error.message);
+    dbStatus = 'connection_failed';
+    dbDetails = {
+      error: error.message,
+      lastAttempt: new Date().toISOString(),
+    };
   }
 
   const healthStatus = {
@@ -355,14 +372,10 @@ const sampleVinyls = [
  */
 app.post('/api/seed', async (req, res) => {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        error: 'Database not connected',
-        message: 'Cannot seed data without database connection',
-      });
-    }
+    // Ensure database connection
+    const { db: database } = await connectDB();
 
-    const collection = db.collection('vinyls');
+    const collection = database.collection('vinyls');
 
     // Clear existing data
     await collection.deleteMany({});
@@ -392,14 +405,10 @@ app.post('/api/seed', async (req, res) => {
  */
 app.get('/api/items', async (req, res) => {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        error: 'Database not connected',
-        message: 'Cannot fetch items without database connection',
-      });
-    }
+    // Ensure database connection
+    const { db: database } = await connectDB();
 
-    const collection = db.collection('vinyls');
+    const collection = database.collection('vinyls');
     const items = await collection.find({}).toArray();
 
     res.json({
@@ -422,12 +431,8 @@ app.get('/api/items', async (req, res) => {
  */
 app.get('/api/items/:id', async (req, res) => {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        error: 'Database not connected',
-        message: 'Cannot fetch item without database connection',
-      });
-    }
+    // Ensure database connection
+    const { db: database } = await connectDB();
 
     const { id } = req.params;
 
@@ -439,7 +444,7 @@ app.get('/api/items/:id', async (req, res) => {
       });
     }
 
-    const collection = db.collection('vinyls');
+    const collection = database.collection('vinyls');
     const item = await collection.findOne({ _id: new ObjectId(id) });
 
     if (!item) {
@@ -468,12 +473,8 @@ app.get('/api/items/:id', async (req, res) => {
  */
 app.post('/api/items', async (req, res) => {
   try {
-    if (!isDatabaseConnected()) {
-      return res.status(503).json({
-        error: 'Database not connected',
-        message: 'Cannot add item without database connection',
-      });
-    }
+    // Ensure database connection
+    const { db: database } = await connectDB();
 
     const {
       name,
@@ -557,7 +558,7 @@ app.post('/api/items', async (req, res) => {
       updatedAt: new Date(),
     };
 
-    const collection = db.collection('vinyls');
+    const collection = database.collection('vinyls');
     const result = await collection.insertOne(newVinyl);
 
     console.log(`✅ Added new vinyl record: ${name} by ${artist}`);
